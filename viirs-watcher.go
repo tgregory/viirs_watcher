@@ -79,9 +79,13 @@ func (df *DataFile) UniqueName() string {
 }
 
 type Config struct {
-	CommonPath     string
-	ProcessingPath string
-	Files          []DataFile
+	InputPath    string
+	OutputPath   string
+	DetectBinary string
+	FitBinary    string
+	ReduceBinary string
+	Env          map[string]string
+	Files        []DataFile
 }
 
 type Data struct {
@@ -92,16 +96,18 @@ type Data struct {
 }
 
 type Pack struct {
+	cfg      *Config
 	received int
 	expected int
 	index    map[string]bool
 	Data     []Data
 }
 
-func NewPack(files []DataFile) (*Pack, error) {
+func NewPack(cfg Config) (*Pack, error) {
 	var p Pack
+	p.cfg = &cfg
 	p.index = make(map[string]bool)
-	for _, df := range files {
+	for _, df := range cfg.Files {
 		name := df.UniqueName()
 		_, ok := p.index[name]
 		if ok {
@@ -128,6 +134,10 @@ func (p *Pack) Notify(d Data) error {
 	p.index[d.Type] = true
 	p.Data = append(p.Data, d)
 	return nil
+}
+
+func (p *Pack) Process() error {
+
 }
 
 func work(cfg Config, data <-chan Data) {
