@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"github.com/fsnotify/fsnotify"
+	"golang.org/x/exp/inotify"
 	"log"
 	"os"
 	"os/exec"
@@ -64,6 +64,7 @@ func (c *Config) Done(s *State) bool {
 	}
 	for _, b := range c.RequireFiles {
 		if _, ok := index[b]; !ok {
+			log.Printf("State %s incomplete at least %s left.", s.Id, b)
 			return false
 		}
 	}
@@ -162,12 +163,12 @@ func main() {
 	}
 	cfg.Constrain()
 	notifications := make(chan string)
-	watcher, err := fsnotify.NewWatcher()
+	watcher, err := inotify.NewWatcher()
 	defer watcher.Close()
 	if nil != err {
 		log.Panicf("Failed to start watcher: %s\n", err.Error())
 	}
-	if err = watcher.Add(cfg.WatchDir); nil != err {
+	if err = watcher.AddWatch(cfg.WatchDir, inotify.IN_CLOSE_WRITE); nil != err {
 		log.Panicf("Failed to start watching directory: %s\n", err.Error())
 	}
 	go work(cfg, notifications)
@@ -176,14 +177,14 @@ func main() {
 	EVENT_LOOP:
 		for {
 			select {
-			case event, ok := <-watcher.Events:
+			case event, ok := <-watcher.Event:
 				if !ok {
 					break EVENT_LOOP
 				}
-				if event.Op&fsnotify.Write == fsnotify.Write && event.Name != cfg.WatchDir {
+				if event.Mask&inotify.IN_CLOSE_WRITE == inotify.IN_CLOSE_WRITE && event.Name != cfg.WatchDir {
 					notifications <- event.Name
 				}
-			case e, ok := <-watcher.Errors:
+			case e, ok := <-watcher.Error:
 				if !ok {
 					break EVENT_LOOP
 				}
