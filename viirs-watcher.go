@@ -103,9 +103,7 @@ func NewState(fp string) (*State, error) {
 		return nil, UnexpectedName
 	}
 	s.Id = strings.Join(parts[1:5], "_")
-	if strings.HasPrefix(parts[0], "SV") {
-		s.Files = append(s.Files, parts[0])
-	}
+	s.Files = append(s.Files, parts[0])
 	if parts[0] == m10 {
 		s.M10File = fp
 	}
