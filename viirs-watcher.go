@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 )
@@ -19,14 +20,11 @@ var (
 )
 
 var (
-	//bands = []string{"DNB", "SVM07", "SVM08", "SVM10", "SVM12", "SVM13", "SVM14", "SVM15", "SVM16"}
 	version       = "v2.1"
 	defaultPath   = "."
-	defaultDetect = "vnf_detect"
-	defaultFit    = "vnf_fit"
+	defaultDetect = "viirs_detect"
+	defaultFit    = "viirs_fit"
 	m10           = "SVM10"
-	gmtco         = "GMTCO"
-	iicmo         = "IICMO"
 )
 
 type Config struct {
@@ -35,18 +33,16 @@ type Config struct {
 	DetectBinary string
 	FitBinary    string
 	ReduceBinary string
-	RequireBands []string
-	RequireGMTCO bool
-	RequireIICMO bool
+	RequireFiles []string
 }
 
 func (c *Config) Constrain() {
-	for _, s := range c.RequireBands {
+	for _, s := range c.RequireFiles {
 		if m10 == s {
 			return
 		}
 	}
-	c.RequireBands = append(c.RequireBands, m10)
+	c.RequireFiles = append(c.RequireFiles, m10)
 	if "" == c.OutputDir {
 		c.OutputDir = defaultPath
 	}
@@ -62,17 +58,11 @@ func (c *Config) Constrain() {
 }
 
 func (c *Config) Done(s *State) bool {
-	if c.RequireGMTCO != s.GMTCO {
-		return false
-	}
-	if c.RequireIICMO != s.IICMO {
-		return false
-	}
 	index := make(map[string]struct{})
-	for _, b := range s.Bands {
+	for _, b := range s.Files {
 		index[b] = struct{}{}
 	}
-	for _, b := range c.RequireBands {
+	for _, b := range c.RequireFiles {
 		if _, ok := index[b]; !ok {
 			return false
 		}
@@ -83,14 +73,16 @@ func (c *Config) Done(s *State) bool {
 func (c *Config) Process(s *State) error {
 	detfile := filepath.Join(c.OutputDir, strings.Join([]string{"VNFD", s.Id, version}, "_")) + ".csv"
 	detect := exec.Command(c.DetectBinary, s.M10File, "-output", detfile, "-cloud", "0")
-	err := detect.Run()
+	out, err := detect.Output()
 	if nil != err {
+		log.Printf("DEBUG Detect output: %s\n", string(out))
 		return DetectFailed
 	}
 	fitfile := filepath.Join(c.OutputDir, strings.Join([]string{"VNFL", s.Id, version}, "_")) + ".csv"
 	fit := exec.Command(c.FitBinary, detfile, "-output", fitfile, "-plot", "1", "-map", "1", "-localmax", "1", "-size", "100", "-font", "10")
-	err = fit.Run()
+	out, err = fit.Output()
 	if nil != err {
+		log.Printf("DEBUG Fit output: %s\n", string(out))
 		return FitFailed
 	}
 	return nil
@@ -99,9 +91,7 @@ func (c *Config) Process(s *State) error {
 type State struct {
 	Id      string
 	M10File string
-	Bands   []string
-	GMTCO   bool
-	IICMO   bool
+	Files   []string
 }
 
 func NewState(fp string) (*State, error) {
@@ -113,7 +103,7 @@ func NewState(fp string) (*State, error) {
 	}
 	s.Id = strings.Join(parts[1:5], "_")
 	if strings.HasPrefix(parts[0], "SV") {
-		s.Bands = append(s.Bands, parts[0])
+		s.Files = append(s.Files, parts[0])
 	}
 	if parts[0] == m10 {
 		s.M10File = fp
@@ -125,12 +115,10 @@ func (s *State) Merge(s2 *State) error {
 	if s.Id != s2.Id {
 		return IdMissmatch
 	}
-	s.Bands = append(s.Bands, s2.Bands...)
+	s.Files = append(s.Files, s2.Files...)
 	if s.M10File == "" {
 		s.M10File = s2.M10File
 	}
-	s.GMTCO = s.GMTCO || s2.GMTCO
-	s.IICMO = s.IICMO || s2.IICMO
 	return nil
 }
 
@@ -149,6 +137,7 @@ func work(cfg Config, files <-chan string) {
 		if !cfg.Done(s) {
 			continue
 		}
+		log.Printf("Granule %s ready for processing.\n", s.Id)
 		delete(awaiting, s.Id)
 		if err = cfg.Process(s); nil != err {
 			log.Printf("Processing failed: %s for %s\n", err.Error(), s.Id)
@@ -161,6 +150,7 @@ func main() {
 	var cfg Config
 	if len(os.Args) >= 2 {
 		fcfg, err := os.Open(os.Args[1])
+		defer fcfg.Close()
 		if nil != err {
 			log.Panicln("Failed to open config.")
 		}
@@ -168,10 +158,12 @@ func main() {
 		if err = dec.Decode(&cfg); nil != err {
 			log.Panicln("Failed to parse config.")
 		}
+		fcfg.Close()
 	}
 	cfg.Constrain()
 	notifications := make(chan string)
 	watcher, err := fsnotify.NewWatcher()
+	defer watcher.Close()
 	if nil != err {
 		log.Panicf("Failed to start watcher: %s\n", err.Error())
 	}
@@ -179,14 +171,27 @@ func main() {
 		log.Panicf("Failed to start watching directory: %s\n", err.Error())
 	}
 	go work(cfg, notifications)
-	for {
-		select {
-		case event := <-watcher.Events:
-			if event.Op&fsnotify.Write == fsnotify.Write && event.Name != cfg.WatchDir {
-				notifications <- event.Name
+	log.Printf("Watching: %s\n", cfg.WatchDir)
+	go func() {
+	EVENT_LOOP:
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					break EVENT_LOOP
+				}
+				if event.Op&fsnotify.Write == fsnotify.Write && event.Name != cfg.WatchDir {
+					notifications <- event.Name
+				}
+			case e, ok := <-watcher.Errors:
+				if !ok {
+					break EVENT_LOOP
+				}
+				log.Printf("Watcher error: %s", e.Error())
 			}
-		case e := <-watcher.Errors:
-			log.Printf("Watcher error: %s", e.Error())
 		}
-	}
+	}()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
 }
