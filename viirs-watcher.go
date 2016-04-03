@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"golang.org/x/exp/inotify"
+	"ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -143,6 +146,79 @@ func work(cfg Config, files <-chan string) {
 		}
 	}
 	log.Printf("Notifications channel closed. All done. \n")
+}
+
+type LayoutWatcher struct {
+	period time.Duration
+	paths  string
+	event  chan string
+	err    chan error
+	wg     sync.WaitGroup
+	done   map[string]chan struct{}
+}
+
+func NewLayoutWatcher(period time.Duration) *LayoutWatcher {
+	return &LayoutWatcher{
+		period: period,
+		event:  make(chan string),
+		err:    make(chan error),
+		done:   make(map[string]chan struct{}),
+	}
+}
+
+func (lw *LayoutWatcher) Event() <-chan string {
+	return lw.event
+}
+
+func (lw *LayoutWatcher) Error() <-chan error {
+	return lw.err
+}
+
+func (lw *LayoutWatcher) Stop() {
+	for k := range lw.done {
+		close(lw.done[k])
+	}
+	lw.wg.Wait()
+}
+
+func (lw *LayoutWatcher) AddWatch(path string) {
+	lw.wg.Add(1)
+	done := make(chan struct{})
+	if _, ok := lw.done[path]; ok {
+		return // prevent double watch
+	}
+	lw.done[path] = done
+	var currentCheck time.Time
+	lastCheck := time.Now()
+	go func() {
+	WATCH_LOOP:
+		for {
+			func() {
+				currentCheck = time.Now()
+				finfos, err := ioutil.ReadDir(path)
+				if nil != err {
+					lw.err <- err
+					return
+				}
+
+				for _, finfo := range finfos {
+					if finfo.ModTime().After(lastCheck) {
+						lw.event <- filepath.Join(path, finfo.Name())
+					}
+				}
+
+				lastCheck = currentCheck
+			}()
+			notif := time.After(lw.period)
+			select {
+			case <-notif:
+				continue WATCH_LOOP
+			case <-done:
+				break WATCH_LOOP
+			}
+		}
+		lw.wg.Done()
+	}()
 }
 
 func main() {
