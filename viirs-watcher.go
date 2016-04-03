@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"golang.org/x/exp/inotify"
-	"ioutil"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -30,8 +30,18 @@ var (
 	m10           = "SVM10"
 )
 
+const (
+	Inotify = "inotify"
+	Timed   = "timed"
+)
+
 type Config struct {
-	WatchDir     string
+	Watcher struct {
+		Type        string
+		Period      time.Duration
+		WatchDir    string
+		SubWatchDir string
+	}
 	OutputDir    string
 	DetectBinary string
 	FitBinary    string
@@ -49,8 +59,11 @@ func (c *Config) Constrain() {
 	if "" == c.OutputDir {
 		c.OutputDir = defaultPath
 	}
-	if "" == c.WatchDir {
-		c.WatchDir = defaultPath
+	if "" == c.Watcher.Type {
+		c.Watcher.Type = "inotify"
+	}
+	if "" == c.Watcher.WatchDir {
+		c.Watcher.WatchDir = defaultPath
 	}
 	if "" == c.DetectBinary {
 		c.DetectBinary = defaultDetect
@@ -124,9 +137,15 @@ func (s *State) Merge(s2 *State) error {
 	return nil
 }
 
-func work(cfg Config, files <-chan string) {
+type Notification struct {
+	File      string
+	OnProcess func()
+}
+
+func work(cfg Config, notifications <-chan Notification) {
 	awaiting := make(map[string]*State)
-	for f := range files {
+	for notif := range notifications {
+		f := notif.File
 		s, err := NewState(f)
 		if nil != err {
 			log.Printf("State creation fail: %s for %s\n", err.Error(), f)
@@ -144,8 +163,54 @@ func work(cfg Config, files <-chan string) {
 		if err = cfg.Process(s); nil != err {
 			log.Printf("Processing failed: %s for %s\n", err.Error(), s.Id)
 		}
+		notif.OnProcess()
 	}
 	log.Printf("Notifications channel closed. All done. \n")
+}
+
+func workLayout(cfg Config, dirs <-chan string) {
+	var watchers []*LayoutWatcher
+	notifications := make(chan Notification)
+	go work(cfg, notifications)
+	for d := range dirs {
+		lw := NewLayoutWatcher(cfg.Watcher.Period)
+		watchers = append(watchers, lw)
+		lw.AddWatch(filepath.Join(d, cfg.Watcher.SubWatchDir))
+	FILE_LOOP:
+		for {
+			select {
+			case file, ok := <-lw.Event():
+				if !ok {
+					break FILE_LOOP
+				}
+				go func() {
+					finfo, err := os.Stat(file)
+					if nil != err {
+						log.Println(err)
+						return
+					}
+					osz := finfo.Size()
+					<-time.After(10 * time.Second)
+					finfo, err = os.Stat(file)
+					if nil != err {
+						log.Println(err)
+						return
+					}
+					if finfo.Size() == osz {
+						notifications <- Notification{file, lw.Close}
+					}
+				}()
+			case err, ok := <-lw.Error():
+				if !ok {
+					break FILE_LOOP
+				}
+				log.Println(err.Error())
+			}
+		}
+	}
+	for _, w := range watchers {
+		w.Close()
+	}
 }
 
 type LayoutWatcher struct {
@@ -174,7 +239,7 @@ func (lw *LayoutWatcher) Error() <-chan error {
 	return lw.err
 }
 
-func (lw *LayoutWatcher) Stop() {
+func (lw *LayoutWatcher) Close() {
 	for k := range lw.done {
 		close(lw.done[k])
 	}
@@ -236,36 +301,54 @@ func main() {
 		fcfg.Close()
 	}
 	cfg.Constrain()
-	notifications := make(chan string)
-	watcher, err := inotify.NewWatcher()
-	defer watcher.Close()
-	if nil != err {
-		log.Panicf("Failed to start watcher: %s\n", err.Error())
-	}
-	if err = watcher.AddWatch(cfg.WatchDir, inotify.IN_CLOSE_WRITE); nil != err {
-		log.Panicf("Failed to start watching directory: %s\n", err.Error())
-	}
-	go work(cfg, notifications)
-	log.Printf("Watching: %s\n", cfg.WatchDir)
-	go func() {
-	EVENT_LOOP:
-		for {
-			select {
-			case event, ok := <-watcher.Event:
-				if !ok {
-					break EVENT_LOOP
+	switch strings.ToLower(cfg.Watcher.Type) {
+	case Inotify:
+		watcher, err := inotify.NewWatcher()
+		defer watcher.Close()
+		if nil != err {
+			log.Panicf("Failed to start watcher: %s\n", err.Error())
+		}
+		if err = watcher.AddWatch(cfg.Watcher.WatchDir, inotify.IN_CLOSE_WRITE); nil != err {
+			log.Panicf("Failed to start watching directory: %s\n", err.Error())
+		}
+		notifications := make(chan Notification)
+		go work(cfg, notifications)
+		log.Printf("Watching: %s\n", cfg.Watcher.WatchDir)
+		go func() {
+		EVENT_LOOP:
+			for {
+				select {
+				case event, ok := <-watcher.Event:
+					if !ok {
+						break EVENT_LOOP
+					}
+					if event.Mask&inotify.IN_CLOSE_WRITE == inotify.IN_CLOSE_WRITE && event.Name != cfg.Watcher.WatchDir {
+						notifications <- Notification{event.Name, func() {}}
+					}
+				case e, ok := <-watcher.Error:
+					if !ok {
+						break EVENT_LOOP
+					}
+					log.Printf("Watcher error: %s", e.Error())
 				}
-				if event.Mask&inotify.IN_CLOSE_WRITE == inotify.IN_CLOSE_WRITE && event.Name != cfg.WatchDir {
-					notifications <- event.Name
-				}
-			case e, ok := <-watcher.Error:
+			}
+		}()
+	case Timed:
+		watcher := NewLayoutWatcher(cfg.Watcher.Period)
+		defer watcher.Close()
+		watcher.AddWatch(cfg.Watcher.WatchDir)
+		go workLayout(cfg, watcher.Event())
+		go func() {
+		EVENT_LOOP:
+			for {
+				e, ok := <-watcher.Error()
 				if !ok {
 					break EVENT_LOOP
 				}
 				log.Printf("Watcher error: %s", e.Error())
 			}
-		}
-	}()
+		}()
+	}
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 	<-c
