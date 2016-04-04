@@ -297,9 +297,7 @@ func (lw *LayoutWatcher) AddWatch(path string) {
 				}
 
 				for _, finfo := range finfos {
-					log.Printf("File %v modtime %v lastCheck %v\n", finfo.Name(), finfo.ModTime(), lastCheck)
 					if finfo.ModTime().After(lastCheck) {
-						log.Printf("Sending event %v", finfo.Name())
 						lw.event <- filepath.Join(path, finfo.Name())
 						if finfo.ModTime().After(maxTime) {
 							maxTime = finfo.ModTime()
