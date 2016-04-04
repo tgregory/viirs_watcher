@@ -24,7 +24,7 @@ var (
 	NoNightData      = errors.New("File provided does not contain nighttime data.")
 )
 
-const DefaultPeriod = 30 * time.Second
+const DefaultPeriod = 3 * time.Second
 
 var (
 	version       = "v2.1"
@@ -199,6 +199,7 @@ func workLayout(cfg Config, dirs <-chan string) {
 			log.Printf("Failed to parse period, failing back to default %s\n", DefaultPeriod)
 			period = DefaultPeriod
 		}
+		log.Printf("Notified of directory %s. Starting to watch %s.\n", d, filepath.Join(d, cfg.Watcher.SubWatchDir))
 		lw := NewLayoutWatcher(period)
 		watchers = append(watchers, lw)
 		lw.AddWatch(filepath.Join(d, cfg.Watcher.SubWatchDir))
@@ -216,7 +217,7 @@ func workLayout(cfg Config, dirs <-chan string) {
 						return
 					}
 					osz := finfo.Size()
-					<-time.After(10 * time.Second)
+					<-time.After(3 * time.Second)
 					finfo, err = os.Stat(file)
 					if nil != err {
 						log.Println(err)
@@ -225,6 +226,7 @@ func workLayout(cfg Config, dirs <-chan string) {
 					if finfo.Size() == osz {
 						notifications <- Notification{file, lw.Close}
 					}
+					log.Printf("File %s did not change withing 10 seconds. Sending it as notification.\n", file)
 				}()
 			case err, ok := <-lw.Error():
 				if !ok {
@@ -246,6 +248,7 @@ type LayoutWatcher struct {
 	err    chan error
 	wg     sync.WaitGroup
 	done   map[string]chan struct{}
+	//once   sync.Once
 }
 
 func NewLayoutWatcher(period time.Duration) *LayoutWatcher {
@@ -266,10 +269,12 @@ func (lw *LayoutWatcher) Error() <-chan error {
 }
 
 func (lw *LayoutWatcher) Close() {
+	//lw.once.Do(func() {
 	for k := range lw.done {
 		close(lw.done[k])
 	}
 	lw.wg.Wait()
+	//})
 }
 
 func (lw *LayoutWatcher) AddWatch(path string) {
@@ -279,13 +284,12 @@ func (lw *LayoutWatcher) AddWatch(path string) {
 		return // prevent double watch
 	}
 	lw.done[path] = done
-	var currentCheck time.Time
 	lastCheck := time.Now()
 	go func() {
 	WATCH_LOOP:
 		for {
 			func() {
-				currentCheck = time.Now()
+				maxTime := lastCheck
 				finfos, err := ioutil.ReadDir(path)
 				if nil != err {
 					lw.err <- err
@@ -293,12 +297,17 @@ func (lw *LayoutWatcher) AddWatch(path string) {
 				}
 
 				for _, finfo := range finfos {
+					log.Printf("File %v modtime %v lastCheck %v\n", finfo.Name(), finfo.ModTime(), lastCheck)
 					if finfo.ModTime().After(lastCheck) {
+						log.Printf("Sending event %v", finfo.Name())
 						lw.event <- filepath.Join(path, finfo.Name())
+						if finfo.ModTime().After(maxTime) {
+							maxTime = finfo.ModTime()
+						}
 					}
 				}
 
-				lastCheck = currentCheck
+				lastCheck = maxTime
 			}()
 			notif := time.After(lw.period)
 			select {
@@ -370,6 +379,7 @@ func main() {
 		defer watcher.Close()
 		watcher.AddWatch(cfg.Watcher.WatchDir)
 		go workLayout(cfg, watcher.Event())
+		log.Printf("Watching: %s\n", cfg.Watcher.WatchDir)
 		go func() {
 		EVENT_LOOP:
 			for {
