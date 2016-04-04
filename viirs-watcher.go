@@ -16,10 +16,12 @@ import (
 )
 
 var (
-	IdMissmatch    = errors.New("Merging of states with different Ids is not allowed.")
-	UnexpectedName = errors.New("Filename does not satisfy the expected pattern.")
-	DetectFailed   = errors.New("Detect binary launch failed.")
-	FitFailed      = errors.New("Fit binary launch failed.")
+	IdMissmatch      = errors.New("Merging of states with different Ids is not allowed.")
+	UnexpectedName   = errors.New("Filename does not satisfy the expected pattern.")
+	DetectFailed     = errors.New("Detect binary launch failed.")
+	FitFailed        = errors.New("Fit binary launch failed.")
+	NightCheckFailed = errors.New("Failed to check if night data provided.")
+	NoNightData      = errors.New("File provided does not contain nighttime data.")
 )
 
 var (
@@ -45,6 +47,7 @@ type Config struct {
 	OutputDir    string
 	DetectBinary string
 	FitBinary    string
+	H5DumpBinary string
 	ReduceBinary string
 	RequireFiles []string
 }
@@ -87,7 +90,23 @@ func (c *Config) Done(s *State) bool {
 	return true
 }
 
+func (c *Config) hasNight(s *State) (bool, error) {
+	h5dump := exec.Command(c.H5DumpBinary, "-x", "-A", s.M10File)
+	out, err := h5dump.Output()
+	if nil != err {
+		log.Printf("H5Dump failed: %s\n", err.Error())
+		return true, NightCheckFailed
+	}
+	if strings.Contains(string(out), "Descending_Indicator") {
+		return true, nil
+	}
+	return false, nil
+}
+
 func (c *Config) Process(s *State) error {
+	if night, err := c.hasNight(s); nil == err && !night {
+		return NoNightData
+	}
 	detfile := filepath.Join(c.OutputDir, strings.Join([]string{"VNFD", s.Id, version}, "_")) + ".csv"
 	detect := exec.Command(c.DetectBinary, s.M10File, "-output", detfile, "-cloud", "0")
 	out, err := detect.Output()
