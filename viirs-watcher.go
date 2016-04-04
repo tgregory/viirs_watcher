@@ -24,6 +24,8 @@ var (
 	NoNightData      = errors.New("File provided does not contain nighttime data.")
 )
 
+const DefaultPeriod = 30 * time.Second
+
 var (
 	version       = "v2.1"
 	defaultPath   = "."
@@ -40,7 +42,7 @@ const (
 type Config struct {
 	Watcher struct {
 		Type        string
-		Period      time.Duration
+		Period      string
 		WatchDir    string
 		SubWatchDir string
 	}
@@ -192,7 +194,12 @@ func workLayout(cfg Config, dirs <-chan string) {
 	notifications := make(chan Notification)
 	go work(cfg, notifications)
 	for d := range dirs {
-		lw := NewLayoutWatcher(cfg.Watcher.Period)
+		period, err := time.ParseDuration(cfg.Watcher.Period)
+		if nil != err {
+			log.Printf("Failed to parse period, failing back to default %s\n", DefaultPeriod)
+			period = DefaultPeriod
+		}
+		lw := NewLayoutWatcher(period)
 		watchers = append(watchers, lw)
 		lw.AddWatch(filepath.Join(d, cfg.Watcher.SubWatchDir))
 	FILE_LOOP:
@@ -315,6 +322,7 @@ func main() {
 		}
 		dec := json.NewDecoder(fcfg)
 		if err = dec.Decode(&cfg); nil != err {
+			log.Printf("Config parse error: %s\n", err.Error())
 			log.Panicln("Failed to parse config.")
 		}
 		fcfg.Close()
@@ -353,7 +361,12 @@ func main() {
 			}
 		}()
 	case Timed:
-		watcher := NewLayoutWatcher(cfg.Watcher.Period)
+		period, err := time.ParseDuration(cfg.Watcher.Period)
+		if nil != err {
+			log.Printf("Failed to parse period, failing back to default %s\n", DefaultPeriod)
+			period = DefaultPeriod
+		}
+		watcher := NewLayoutWatcher(period)
 		defer watcher.Close()
 		watcher.AddWatch(cfg.Watcher.WatchDir)
 		go workLayout(cfg, watcher.Event())
