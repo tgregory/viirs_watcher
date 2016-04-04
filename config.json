@@ -1,5 +1,8 @@
 {
-  "WatchDir": "test",
+  "Watcher": {
+    "Type": "inotify",
+    "WatchDir": "test",
+  },
   "OutputDir": "output",
   "DetectBinary": "test_detect",
   "FitBinary": "test_fit",
