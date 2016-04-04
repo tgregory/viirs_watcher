@@ -45,6 +45,7 @@ type Config struct {
 		Period      string
 		WatchDir    string
 		SubWatchDir string
+		Prefix      string
 	}
 	OutputDir    string
 	DetectBinary string
@@ -194,6 +195,11 @@ func workLayout(cfg Config, dirs <-chan string) {
 	notifications := make(chan Notification)
 	go work(cfg, notifications)
 	for d := range dirs {
+		log.Printf("Received directory notification for %s.", d)
+		if !strings.HasPrefix(filepath.Base(d), cfg.Watcher.Prefix) {
+			log.Printf("Directory %s does not start with specified prefix %s ignoring.", filepath.Base(d), cfg.Watcher.Prefix)
+			continue
+		}
 		period, err := time.ParseDuration(cfg.Watcher.Period)
 		if nil != err {
 			log.Printf("Failed to parse period, failing back to default %s\n", DefaultPeriod)
@@ -202,7 +208,8 @@ func workLayout(cfg Config, dirs <-chan string) {
 		log.Printf("Notified of directory %s. Starting to watch %s.\n", d, filepath.Join(d, cfg.Watcher.SubWatchDir))
 		lw := NewLayoutWatcher(period)
 		watchers = append(watchers, lw)
-		lw.AddWatch(filepath.Join(d, cfg.Watcher.SubWatchDir))
+		var since time.Time
+		lw.AddWatch(filepath.Join(d, cfg.Watcher.SubWatchDir), since)
 	FILE_LOOP:
 		for {
 			select {
@@ -277,14 +284,14 @@ func (lw *LayoutWatcher) Close() {
 	//})
 }
 
-func (lw *LayoutWatcher) AddWatch(path string) {
+func (lw *LayoutWatcher) AddWatch(path string, since time.Time) {
 	lw.wg.Add(1)
 	done := make(chan struct{})
 	if _, ok := lw.done[path]; ok {
 		return // prevent double watch
 	}
 	lw.done[path] = done
-	lastCheck := time.Now()
+	lastCheck := since
 	go func() {
 	WATCH_LOOP:
 		for {
@@ -375,7 +382,7 @@ func main() {
 		}
 		watcher := NewLayoutWatcher(period)
 		defer watcher.Close()
-		watcher.AddWatch(cfg.Watcher.WatchDir)
+		watcher.AddWatch(cfg.Watcher.WatchDir, time.Now())
 		go workLayout(cfg, watcher.Event())
 		log.Printf("Watching: %s\n", cfg.Watcher.WatchDir)
 		go func() {
