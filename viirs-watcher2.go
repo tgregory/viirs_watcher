@@ -18,7 +18,7 @@ var UnexpectedName = errors.New("Name does not satisfy expected pattern.")
 var watchDir = "/data"
 var subDir = "result"
 var prefix = "NPP"
-var period = 15 * time.Second
+var period = 30 * time.Second
 
 const m10 = "SVM10"
 
@@ -117,18 +117,18 @@ func isRequired(s string) bool {
 	return false
 }
 
-func fileDone(f string) bool {
+func hasChanged(f string, to time.Duration) bool {
 	finfo, err := os.Stat(f)
 	if nil != err {
 		log.Printf("Failed to stat file %s", f)
 	}
-	osz := finfo.Size()
-	<-time.After(3 * time.Second)
+	osmt := finfo.ModTime()
+	<-time.After(to)
 	finfo, err = os.Stat(f)
 	if nil != err {
 		log.Printf("Failed to stat file %s", f)
 	}
-	if osz == finfo.Size() {
+	if osmt.Equal(finfo.ModTime()) {
 		return true
 	}
 	return false
@@ -147,7 +147,7 @@ func watchSub(dir string) {
 		for _, f := range finfos {
 			if isRequired(f.Name()) {
 				_, ok := marked[f.Name()]
-				if !ok && fileDone(filepath.Join(dir, f.Name())) {
+				if !ok && !hasChanged(filepath.Join(dir, f.Name()), 3*time.Second) {
 					found += 1
 					log.Printf("Required file %s found", f.Name())
 					marked[f.Name()] = true
@@ -172,7 +172,12 @@ func watchRoot(dir string, since time.Time) time.Time {
 	for _, finfo := range finfos {
 		if finfo.ModTime().After(since) {
 			if strings.HasPrefix(finfo.Name(), prefix) {
-				go watchSub(filepath.Join(dir, finfo.Name(), subDir))
+				go func() {
+					subdir := filepath.Join(dir, finfo.Name(), subDir)
+					if !hasChanged(subdir, 15*time.Second) {
+						watchSub(subdir)
+					}
+				}()
 				if finfo.ModTime().After(maxTime) {
 					maxTime = finfo.ModTime()
 				}
