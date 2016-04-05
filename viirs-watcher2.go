@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	xp "gopkg.in/xmlpath.v2"
 	"io/ioutil"
 	"log"
 	"os"
@@ -59,8 +61,21 @@ func hasNight(m10file string) bool {
 		log.Printf("WARN: H5Dump failed: %s\n", err.Error())
 		return true
 	}
-	if strings.Contains(string(out), "Descending_Indicator") {
+	path, err := xp.Compile("//Attribute[contains(@Name, 'Ascending/Descending_Indicator')]/Data/DataFromFile")
+	if nil != err {
+		log.Printf("WARN: Failed to compile xpath query due to %s", err.Error())
 		return true
+	}
+	root, err := xp.Parse(bytes.NewReader(out))
+	if nil != err {
+		log.Printf("WARN: Failed to retreive root node due to %s", err.Error())
+		return true
+	}
+	iter := path.Iter(root)
+	for iter.Next() {
+		if strings.TrimSpace(iter.Node().String()) != "0" {
+			return true
+		}
 	}
 	return false
 }
