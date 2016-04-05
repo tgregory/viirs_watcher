@@ -121,12 +121,14 @@ func hasChanged(f string, to time.Duration) bool {
 	finfo, err := os.Stat(f)
 	if nil != err {
 		log.Printf("Failed to stat file %s", f)
+		return true
 	}
 	osmt := finfo.ModTime()
 	<-time.After(to)
 	finfo, err = os.Stat(f)
 	if nil != err {
 		log.Printf("Failed to stat file %s", f)
+		return true
 	}
 	if osmt.Equal(finfo.ModTime()) {
 		return true
@@ -172,12 +174,12 @@ func watchRoot(dir string, since time.Time) time.Time {
 	for _, finfo := range finfos {
 		if finfo.ModTime().After(since) {
 			if strings.HasPrefix(finfo.Name(), prefix) {
-				go func() {
+				go func(finfo os.FileInfo) {
 					subdir := filepath.Join(dir, finfo.Name(), subDir)
 					if !hasChanged(subdir, 15*time.Second) {
 						watchSub(subdir)
 					}
-				}()
+				}(finfo)
 				if finfo.ModTime().After(maxTime) {
 					maxTime = finfo.ModTime()
 				}
